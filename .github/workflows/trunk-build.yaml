@@ -1,5 +1,5 @@
 ---
-name: Push to default publish to internal track
+name: Build GMS APK
 "on":
   workflow_dispatch:
   push:
@@ -25,72 +25,32 @@ env:
   GRADLE_OPTS: "-Dorg.gradle.daemon=true -Dorg.gradle.configuration-cache=true -Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.jvmargs='-Xmx3096M -Dkotlin.daemon.jvm.options=-Xmx2048M -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8 -XX:+UseParallelGC'"
 jobs:
   build:
-    name: Build
+    name: Build GMS APK
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: "Checkout"
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Build
-        uses: ./.github/actions/gradle-task
-        with:
-          task: assembleDebug ktfmtCheck assembleRelease
-          gradle-cache-encryption-key: ${{ secrets.GradleEncryptionKey }}
-  publish-to-play-store:
-    name: "Publish to Play Store"
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: build
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Setup Ruby and Fastlane
-        uses: ruby/setup-ruby@v1
-        with:
-          bundler-cache: true
-      - name: Get next version code
-        id: version_code
-        run: |
-          LATEST_VERSION_CODE="$(bundle exec fastlane get_version_code track:internal | sed -n "s/.*Found '\([0-9]*\)'.*/\1/p")"
-          echo "Latest version code is: $LATEST_VERSION_CODE"
-          NEXT_VERSION_CODE="$((LATEST_VERSION_CODE + 1))"
-          echo "version_code=$NEXT_VERSION_CODE" >> "$GITHUB_OUTPUT"
-          echo "Next version code will be: $NEXT_VERSION_CODE"
-        env:
-          ANDROID_PUBLISHER_CREDENTIALS: ${{ secrets.GOOGLE_CLOUD_SERVICE_ACCOUNT_CREDENTIALS }}
+
       - name: Create keystore
         run: |
           echo -n "${KEYSTORE_BASE64}" | base64 -d > project/owntracks.release.keystore.jks
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-      - name: Build Release Bundle
+
+      - name: Build signed GMS release APK
         uses: ./.github/actions/gradle-task
         with:
-          task: bundleGmsRelease
+          task: assembleGmsRelease ktfmtCheck
           gradle-cache-encryption-key: ${{ secrets.GradleEncryptionKey }}
         env:
           KEYSTORE_PASSPHRASE: ${{ secrets.KEYSTORE_PASSPHRASE }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
-          VERSION_CODE: ${{ steps.version_code.outputs.version_code }}
-      - name: Save AAB artifact
+
+      - name: Save APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: patryk-osmand-tracker-gms-release-${{ steps.version_code.outputs.version_code }}
-          path: project/app/build/outputs/bundle/gmsRelease/app-gms-release.aab
+          name: patryk-osmand-tracker-gms-release-apk
+          path: project/app/build/outputs/apk/gms/release/app-gms-release.apk
           if-no-files-found: error
-      - name: Upload to Internal Track
-        run: |
-          if [ -z "${ANDROID_PUBLISHER_CREDENTIALS}" ]; then
-            echo "Play Store upload skipped: GOOGLE_CLOUD_SERVICE_ACCOUNT_CREDENTIALS is empty."
-            exit 0
-          fi
-          if ! ruby -rjson -e 'JSON.parse(STDIN.read)' <<< "${ANDROID_PUBLISHER_CREDENTIALS}"; then
-            echo "Play Store upload skipped: GOOGLE_CLOUD_SERVICE_ACCOUNT_CREDENTIALS is not valid JSON."
-            exit 0
-          fi
-          bundle exec fastlane upload_to_internal aab:project/app/build/outputs/bundle/gmsRelease/app-gms-release.aab
-        env:
-          ANDROID_PUBLISHER_CREDENTIALS: ${{ secrets.GOOGLE_CLOUD_SERVICE_ACCOUNT_CREDENTIALS }}
-
-# Manual trigger preserved; this comment intentionally triggers the push workflow.
