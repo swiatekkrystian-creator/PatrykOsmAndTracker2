@@ -77,3 +77,5 @@ jobs:
         run: bundle exec fastlane upload_to_internal aab:project/app/build/outputs/bundle/gmsRelease/app-gms-release.aab
         env:
           ANDROID_PUBLISHER_CREDENTIALS: ${{ secrets.GOOGLE_CLOUD_SERVICE_ACCOUNT_CREDENTIALS }}
+
+# Manual trigger preserved; this comment intentionally triggers the push workflow.
