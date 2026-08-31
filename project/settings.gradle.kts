@@ -16,6 +16,13 @@ dependencyResolutionManagement {
     mavenCentral()
     maven("https://jitpack.io")
     maven("https://s01.oss.sonatype.org/content/repositories/snapshots/")
+    ivy {
+      name = "OsmAndBinariesIvy"
+      url = uri("https://builder.osmand.net")
+      patternLayout {
+        artifact("ivy/[organisation]/[module]/[revision]/[artifact]-[revision](-[classifier]).[ext]")
+      }
+    }
   }
 }
 
