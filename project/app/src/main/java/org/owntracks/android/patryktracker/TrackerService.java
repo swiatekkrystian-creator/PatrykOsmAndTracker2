@@ -35,6 +35,8 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
+import org.owntracks.android.BuildConfig;
+
 public class TrackerService extends Service {
     private static final long PERIOD_MILLIS = 5L * 60L * 1000L;
     private static final String CHANNEL = "patryk_tracker";
@@ -204,7 +206,6 @@ public class TrackerService extends Service {
 
             Intent intent = new Intent("net.osmand.aidl.OsmandAidlServiceV2");
             intent.setPackage(pkg);
-            String finalPkg = pkg;
             ServiceConnection connection = new ServiceConnection() {
                 @Override public void onServiceConnected(ComponentName name, IBinder binder) {
                     try {
