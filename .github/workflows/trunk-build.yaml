@@ -15,7 +15,7 @@ name: Push to default publish to internal track
       - "project/*.gradle.kts"
       - "project/app/*.gradle.kts"
       - "project/gradle.properties"
-      - "project/gradle/wrapper/gradle-wrapper.properties"
+      - "project/gradle/gradle-wrapper.properties"
       - "project/gradle/libs.versions.toml"
 
 concurrency:
@@ -73,8 +73,23 @@ jobs:
           KEYSTORE_PASSPHRASE: ${{ secrets.KEYSTORE_PASSPHRASE }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
           VERSION_CODE: ${{ steps.version_code.outputs.version_code }}
+      - name: Save AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: patryk-osmand-tracker-gms-release-${{ steps.version_code.outputs.version_code }}
+          path: project/app/build/outputs/bundle/gmsRelease/app-gms-release.aab
+          if-no-files-found: error
       - name: Upload to Internal Track
-        run: bundle exec fastlane upload_to_internal aab:project/app/build/outputs/bundle/gmsRelease/app-gms-release.aab
+        run: |
+          if [ -z "${ANDROID_PUBLISHER_CREDENTIALS}" ]; then
+            echo "Play Store upload skipped: GOOGLE_CLOUD_SERVICE_ACCOUNT_CREDENTIALS is empty."
+            exit 0
+          fi
+          if ! ruby -rjson -e 'JSON.parse(STDIN.read)' <<< "${ANDROID_PUBLISHER_CREDENTIALS}"; then
+            echo "Play Store upload skipped: GOOGLE_CLOUD_SERVICE_ACCOUNT_CREDENTIALS is not valid JSON."
+            exit 0
+          fi
+          bundle exec fastlane upload_to_internal aab:project/app/build/outputs/bundle/gmsRelease/app-gms-release.aab
         env:
           ANDROID_PUBLISHER_CREDENTIALS: ${{ secrets.GOOGLE_CLOUD_SERVICE_ACCOUNT_CREDENTIALS }}
 
