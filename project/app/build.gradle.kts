@@ -39,14 +39,15 @@ val packageVersionCode: Int =
       generatedVersionCode
     }
 val manuallySetVersion: Boolean = System.getenv("VERSION_CODE") != null
-val enablePlayPublishing: Boolean = !System.getenv("ANDROID_PUBLISHER_CREDENTIALS").isNullOrBlank()
 
 android {
   compileSdk = 36
   namespace = "org.owntracks.android"
 
   defaultConfig {
-    applicationId = "org.owntracks.android"
+    // Use a unique application ID so Android treats this as the Patryk Osborne
+    // Tracker 2 app rather than as the original OwnTracks package.
+    applicationId = "com.patrykosborne.tracker2"
     minSdk = 24
     targetSdk = 36
 
