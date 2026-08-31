@@ -104,7 +104,10 @@ android {
           ),
       )
       resValue("string", "GOOGLE_MAPS_API_KEY", googleMapsAPIKey)
-      signingConfig = signingConfigs.findByName("release")
+      // Always produce an installable APK. Use the release keystore when the
+      // signing secrets are configured; otherwise fall back to Android's debug
+      // keystore instead of silently producing an unsigned release APK.
+      signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
     }
 
     named("debug") {
