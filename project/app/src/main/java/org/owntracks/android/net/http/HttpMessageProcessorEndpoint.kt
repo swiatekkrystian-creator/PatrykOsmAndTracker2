@@ -122,8 +122,9 @@ class HttpMessageProcessorEndpoint(
         client.newCall(getRequest(configuration, message)).execute().use { response ->
           Timber.d("HTTP response received: $response")
           if (!response.isSuccessful) {
+            val responseBody = response.body?.string().orEmpty()
             val httpException = Exception("HTTP request failed. Status: ${response.code}")
-            Timber.e("HTTP request failed. Status: ${response.code}")
+            Timber.e("HTTP request failed. Status: ${response.code}; Server response: ${responseBody.take(4000)}")
             endpointStateRepo.setState(
                 EndpointState.ERROR.withMessage(
                     String.format(Locale.ROOT, "HTTP code %d", response.code),
