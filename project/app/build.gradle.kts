@@ -51,6 +51,14 @@ android {
     minSdk = 24
     targetSdk = 36
 
+    // Single source of truth for the Patryk OsmAnd Tracker 2 endpoint.
+    // The sync code derives the actual request (spr=1) from this base URL.
+    buildConfigField(
+        "String",
+        "PATRYK_TRACKER_URL",
+        "\"https://motocyklemprzezgruzje.pl/osm.php?dod=1&ludzie=kr,ed,pt,ha,ad\"",
+    )
+
     versionCode = packageVersionCode
     versionName = versionNameValue
 
@@ -133,6 +141,7 @@ android {
     dataBinding = true
     viewBinding = true
     resValues = true
+    aidl = true
   }
 
   dataBinding { addKtx = true }
@@ -238,6 +247,9 @@ dependencies {
   implementation(libs.bundles.kotlin)
   implementation(libs.bundles.androidx)
   implementation(libs.androidx.test.espresso.idling)
+
+  // OsmAnd AIDL API used to inject live motorcycle markers into OsmAnd.
+  implementation("net.osmand:android-aidl-lib:master-snapshot@aar")
 
   implementation(libs.google.material)
 
