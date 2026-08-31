@@ -52,5 +52,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: patryk-osmand-tracker-gms-release-apk
-          path: project/app/build/outputs/apk/gms/release/app-gms-release.apk
+          path: project/app/build/outputs/apk/gms/release/*.apk
           if-no-files-found: error
