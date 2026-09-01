@@ -119,13 +119,14 @@ class HttpMessageProcessorEndpoint(
     httpClientAndConfiguration!!.run {
       endpointStateRepo.setState(EndpointState.CONNECTING)
       return try {
+        val postJson = message.toJson(parser).orEmpty()
         client.newCall(getRequest(configuration, message)).execute().use { response ->
           Timber.d("HTTP response received: $response")
           if (!response.isSuccessful) {
             val responseBody = response.body?.string().orEmpty()
             val httpException = Exception("HTTP request failed. Status: ${response.code}")
             Timber.e(
-                "HTTP request failed. Status: ${response.code}; Server response: ${responseBody.take(4000)}",
+                "HTTP request failed. Status: ${response.code}; POST body: $postJson; Server response: ${responseBody.take(4000)}",
             )
             endpointStateRepo.setState(
                 EndpointState.ERROR.withMessage(
