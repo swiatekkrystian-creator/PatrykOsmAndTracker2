@@ -21,7 +21,7 @@ import net.osmand.aidlapi.IOsmAndAidlInterface;
 import net.osmand.aidlapi.map.ALatLon;
 import net.osmand.aidlapi.mapmarker.AMapMarker;
 import net.osmand.aidlapi.mapmarker.AddMapMarkerParams;
-import net.osmand.aidlapi.mapmarker.UpdateMapMarkerParams;
+import net.osmand.aidlapi.mapmarker.RemoveMapMarkersParams;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -32,7 +32,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 import org.owntracks.android.BuildConfig;
@@ -138,7 +140,8 @@ public class TrackerService extends Service {
             }
 
             JSONArray all = new JSONArray(body.toString());
-            int sent = 0;
+            List<MarkerData> markers = new ArrayList<>();
+
             for (int i = 0; i < all.length(); i++) {
                 JSONObject object = all.getJSONObject(i);
                 if (!object.has("lat") || !object.has("lon") || !object.has("tid")) continue;
@@ -158,10 +161,13 @@ public class TrackerService extends Service {
                         + (batt >= 0 ? "🔋 " + batt + "%" : "🔋 --")
                         + " " + time;
 
-                OsmAndMarker.set(context, title, lat, lon);
-                sent++;
+                markers.add(new MarkerData(title, lat, lon));
             }
-            return "Pobrano " + all.length() + ", wysłano do OsmAnda " + sent;
+
+            // Only touch OsmAnd after the server response was successfully downloaded and parsed.
+            // This prevents a temporary network error from wiping the currently visible markers.
+            OsmAndMarker.replaceAll(context, markers);
+            return "Pobrano " + all.length() + ", ustawiono flagi " + markers.size();
         } catch (Exception e) {
             return "Błąd: " + e.getClass().getSimpleName() + " " + e.getMessage();
         } finally {
@@ -176,14 +182,33 @@ public class TrackerService extends Service {
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
+    private static final class MarkerData {
+        final String title;
+        final double lat;
+        final double lon;
+
+        MarkerData(String title, double lat, double lon) {
+            this.title = title;
+            this.lat = lat;
+            this.lon = lon;
+        }
+    }
+
     private static class OsmAndMarker {
-        static void set(Context context, String title, double lat, double lon) {
+        static void replaceAll(Context context, List<MarkerData> markers) {
             bind(context, api -> {
-                AMapMarker next = new AMapMarker(new ALatLon(lat, lon), title);
-                AMapMarker previous = new AMapMarker(new ALatLon(0, 0), title);
-                boolean updated = api.updateMapMarker(
-                        new UpdateMapMarkerParams(previous, next, true));
-                if (!updated) api.addMapMarker(new AddMapMarkerParams(next));
+                // Remove all active markers first. This gets rid of markers created by older
+                // versions/refreshes, including duplicates whose titles have changed.
+                api.removeAllActiveMapMarkers(new RemoveMapMarkersParams());
+
+                // Add markers through the same AIDL connection and in JSON order. Separate
+                // bindService calls used previously raced each other and scrambled marker order.
+                for (MarkerData marker : markers) {
+                    AMapMarker next = new AMapMarker(
+                            new ALatLon(marker.lat, marker.lon),
+                            marker.title);
+                    api.addMapMarker(new AddMapMarkerParams(next));
+                }
             });
         }
 
