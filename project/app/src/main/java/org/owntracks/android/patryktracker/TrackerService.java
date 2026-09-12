@@ -23,6 +23,7 @@ import net.osmand.aidlapi.mapmarker.AMapMarker;
 import net.osmand.aidlapi.mapmarker.AddMapMarkerParams;
 import net.osmand.aidlapi.mapmarker.RemoveMapMarkerParams;
 import net.osmand.aidlapi.mapmarker.RemoveMapMarkersParams;
+import net.osmand.aidlapi.mapmarker.UpdateMapMarkerParams;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -36,18 +37,26 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.owntracks.android.BuildConfig;
 
 public class TrackerService extends Service {
     private static final long PERIOD_MILLIS = 5L * 60L * 1000L;
+    private static final int OSMAND_BIND_TIMEOUT_SECONDS = 20;
     private static final String CHANNEL = "patryk_tracker";
     private static final int NOTIFICATION_ID = 1001;
     private static final String PREFS = "patryk_tracker_markers";
     private static final String PREF_MARKERS = "markers";
-    private static final String PREF_INITIALIZED = "initialized";
+    private static final String PREF_SCHEMA = "marker_schema";
+    private static final int MARKER_SCHEMA = 2;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refreshRunnable = new Runnable() {
@@ -133,7 +142,7 @@ public class TrackerService extends Service {
             }
 
             JSONArray all = new JSONArray(body.toString());
-            List<MarkerData> markers = new ArrayList<>();
+            Map<String, MarkerData> markersByTid = new LinkedHashMap<>();
             for (int i = 0; i < all.length(); i++) {
                 JSONObject object = all.getJSONObject(i);
                 if (!object.has("lat") || !object.has("lon") || !object.has("tid")) continue;
@@ -150,11 +159,11 @@ public class TrackerService extends Service {
                         ? new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date(tst * 1000L))
                         : "--:--";
                 String title = name + " " + (batt >= 0 ? "🔋 " + batt + "%" : "🔋 --") + " " + time;
-                markers.add(new MarkerData(tid, title, lat, lon));
+                markersByTid.put(tid, new MarkerData(tid, title, lat, lon));
             }
 
-            OsmAndMarker.replaceAll(context, markers);
-            return "Pobrano " + all.length() + ", ustawiono flagi " + markers.size();
+            OsmAndMarker.replaceAll(context, new ArrayList<>(markersByTid.values()));
+            return "Pobrano " + all.length() + ", ustawiono flagi " + markersByTid.size();
         } catch (Exception e) {
             return "Błąd: " + e.getClass().getSimpleName() + " " + e.getMessage();
         } finally {
@@ -184,65 +193,97 @@ public class TrackerService extends Service {
     }
 
     private static class OsmAndMarker {
-        // A refresh can be triggered by a location upload and by the 5-minute fallback.
-        // Serialize the whole read/remove/add/save transaction so two refreshes can never
-        // both read the same old marker state and then add duplicate markers.
-        private static final Object REPLACE_LOCK = new Object();
+        // All OsmAnd AIDL transactions are serialized on one worker. This is important because
+        // bindService() is asynchronous and refreshes can arrive from both OwnTracks uploads
+        // and the 5-minute fallback at nearly the same time.
+        private static final ExecutorService OSMAND_EXECUTOR = Executors.newSingleThreadExecutor();
 
         static void replaceAll(Context context, List<MarkerData> markers) {
-            bind(context, api -> {
-                synchronized (REPLACE_LOCK) {
-                    SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-                    boolean initialized = prefs.getBoolean(PREF_INITIALIZED, false);
-                    String oldJson = prefs.getString(PREF_MARKERS, "{}");
+            OSMAND_EXECUTOR.execute(() -> replaceAllBlocking(context, markers));
+        }
 
-                    // First run after the old marker implementation: clean the old active set once.
-                    // Later refreshes remove only markers managed by this app, so they are not
-                    // repeatedly pushed into OsmAnd history.
-                    if (!initialized) {
-                        api.removeAllActiveMapMarkers(new RemoveMapMarkersParams());
-                    } else {
-                        removeManagedMarkers(api, oldJson);
-                    }
+        private static void replaceAllBlocking(Context context, List<MarkerData> markers) {
+            bindAndRun(context, api -> {
+                SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+                int schema = prefs.getInt(PREF_SCHEMA, 0);
+                String oldJson = prefs.getString(PREF_MARKERS, "{}");
 
-                    JSONObject newManaged = new JSONObject();
-                    for (MarkerData marker : markers) {
-                        AMapMarker next = new AMapMarker(new ALatLon(marker.lat, marker.lon), marker.title);
-                        if (api.addMapMarker(new AddMapMarkerParams(next))) {
-                            JSONObject saved = new JSONObject();
-                            saved.put("title", marker.title);
-                            saved.put("lat", marker.lat);
-                            saved.put("lon", marker.lon);
-                            newManaged.put(marker.tid, saved);
-                        }
-                    }
-
-                    prefs.edit()
-                            .putString(PREF_MARKERS, newManaged.toString())
-                            .putBoolean(PREF_INITIALIZED, true)
-                            .apply();
+                // One-time migration from the old implementation. The old code could leave
+                // duplicate active markers behind because it remembered only the latest marker
+                // for each tid. Bulk cleanup is intentionally done only once, because OsmAnd
+                // moves removed active markers to history.
+                if (schema < MARKER_SCHEMA) {
+                    api.removeAllActiveMapMarkers(new RemoveMapMarkersParams());
+                    oldJson = "{}";
                 }
+
+                JSONObject old = new JSONObject(oldJson);
+                JSONObject newManaged = new JSONObject();
+                Map<String, MarkerData> current = new LinkedHashMap<>();
+                for (MarkerData marker : markers) current.put(marker.tid, marker);
+
+                // Update existing markers in place. This avoids remove/add on every refresh,
+                // which is what previously created marker history entries and duplicates.
+                Iterator<String> oldKeys = old.keys();
+                while (oldKeys.hasNext()) {
+                    String tid = oldKeys.next();
+                    JSONObject saved = old.getJSONObject(tid);
+                    AMapMarker previous = markerFromJson(saved);
+                    MarkerData currentMarker = current.get(tid);
+
+                    if (currentMarker == null) {
+                        api.removeMapMarker(new RemoveMapMarkerParams(previous, true));
+                        continue;
+                    }
+
+                    AMapMarker next = new AMapMarker(
+                            new ALatLon(currentMarker.lat, currentMarker.lon), currentMarker.title);
+                    boolean updated = api.updateMapMarker(
+                            new UpdateMapMarkerParams(previous, next, true));
+                    if (!updated) {
+                        // If OsmAnd no longer has the old marker, remove any matching stale
+                        // marker and add the current one so the saved state becomes authoritative.
+                        api.removeMapMarker(new RemoveMapMarkerParams(previous, true));
+                        api.addMapMarker(new AddMapMarkerParams(next));
+                    }
+                    saveMarker(newManaged, currentMarker);
+                    current.remove(tid);
+                }
+
+                // Anything left is a brand-new tid.
+                for (MarkerData marker : current.values()) {
+                    AMapMarker next = new AMapMarker(new ALatLon(marker.lat, marker.lon), marker.title);
+                    if (api.addMapMarker(new AddMapMarkerParams(next))) {
+                        saveMarker(newManaged, marker);
+                    }
+                }
+
+                prefs.edit()
+                        .putString(PREF_MARKERS, newManaged.toString())
+                        .putInt(PREF_SCHEMA, MARKER_SCHEMA)
+                        .apply();
             });
         }
 
-        private static void removeManagedMarkers(IOsmAndAidlInterface api, String oldJson) throws Exception {
-            JSONObject old = new JSONObject(oldJson);
-            Iterator<String> keys = old.keys();
-            while (keys.hasNext()) {
-                String tid = keys.next();
-                JSONObject saved = old.getJSONObject(tid);
-                AMapMarker previous = new AMapMarker(
-                        new ALatLon(saved.getDouble("lat"), saved.getDouble("lon")),
-                        saved.getString("title"));
-                api.removeMapMarker(new RemoveMapMarkerParams(previous, true));
-            }
+        private static AMapMarker markerFromJson(JSONObject saved) throws Exception {
+            return new AMapMarker(
+                    new ALatLon(saved.getDouble("lat"), saved.getDouble("lon")),
+                    saved.getString("title"));
+        }
+
+        private static void saveMarker(JSONObject target, MarkerData marker) throws Exception {
+            JSONObject saved = new JSONObject();
+            saved.put("title", marker.title);
+            saved.put("lat", marker.lat);
+            saved.put("lon", marker.lon);
+            target.put(marker.tid, saved);
         }
 
         private interface ApiAction {
             void run(IOsmAndAidlInterface api) throws Exception;
         }
 
-        private static void bind(Context context, ApiAction action) {
+        private static void bindAndRun(Context context, ApiAction action) {
             String[] packages = {"net.osmand.plus", "net.osmand", "net.osmand.dev"};
             String pkg = null;
             for (String candidate : packages) {
@@ -256,21 +297,29 @@ public class TrackerService extends Service {
 
             Intent intent = new Intent("net.osmand.aidl.OsmandAidlServiceV2");
             intent.setPackage(pkg);
+            CountDownLatch connected = new CountDownLatch(1);
             ServiceConnection connection = new ServiceConnection() {
                 @Override public void onServiceConnected(ComponentName name, IBinder binder) {
                     try {
                         action.run(IOsmAndAidlInterface.Stub.asInterface(binder));
                     } catch (Exception ignored) {
                     } finally {
+                        connected.countDown();
                         try { context.unbindService(this); } catch (Exception ignored) { }
                     }
                 }
 
-                @Override public void onServiceDisconnected(ComponentName name) { }
+                @Override public void onServiceDisconnected(ComponentName name) {
+                    connected.countDown();
+                }
             };
+
             try {
-                context.bindService(intent, connection, Context.BIND_AUTO_CREATE);
-            } catch (Exception ignored) { }
+                if (!context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) return;
+                connected.await(OSMAND_BIND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                try { context.unbindService(connection); } catch (Exception ignored2) { }
+            }
         }
     }
 }
