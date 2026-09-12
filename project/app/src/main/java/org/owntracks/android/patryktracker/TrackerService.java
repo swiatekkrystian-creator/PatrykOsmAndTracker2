@@ -14,7 +14,6 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.os.RemoteException;
 
 import androidx.core.app.ServiceCompat;
 
@@ -185,36 +184,44 @@ public class TrackerService extends Service {
     }
 
     private static class OsmAndMarker {
+        // A refresh can be triggered by a location upload and by the 5-minute fallback.
+        // Serialize the whole read/remove/add/save transaction so two refreshes can never
+        // both read the same old marker state and then add duplicate markers.
+        private static final Object REPLACE_LOCK = new Object();
+
         static void replaceAll(Context context, List<MarkerData> markers) {
-            SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-            boolean initialized = prefs.getBoolean(PREF_INITIALIZED, false);
-            String oldJson = prefs.getString(PREF_MARKERS, "{}");
-
             bind(context, api -> {
-                // First run after this fix: clean the old duplicate set once.
-                // Subsequent refreshes remove only markers created by this app, so they do not enter history.
-                if (!initialized) {
-                    api.removeAllActiveMapMarkers(new RemoveMapMarkersParams());
-                } else {
-                    removeManagedMarkers(api, oldJson);
-                }
+                synchronized (REPLACE_LOCK) {
+                    SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+                    boolean initialized = prefs.getBoolean(PREF_INITIALIZED, false);
+                    String oldJson = prefs.getString(PREF_MARKERS, "{}");
 
-                JSONObject newManaged = new JSONObject();
-                for (MarkerData marker : markers) {
-                    AMapMarker next = new AMapMarker(new ALatLon(marker.lat, marker.lon), marker.title);
-                    if (api.addMapMarker(new AddMapMarkerParams(next))) {
-                        JSONObject saved = new JSONObject();
-                        saved.put("title", marker.title);
-                        saved.put("lat", marker.lat);
-                        saved.put("lon", marker.lon);
-                        newManaged.put(marker.tid, saved);
+                    // First run after the old marker implementation: clean the old active set once.
+                    // Later refreshes remove only markers managed by this app, so they are not
+                    // repeatedly pushed into OsmAnd history.
+                    if (!initialized) {
+                        api.removeAllActiveMapMarkers(new RemoveMapMarkersParams());
+                    } else {
+                        removeManagedMarkers(api, oldJson);
                     }
-                }
 
-                prefs.edit()
-                        .putString(PREF_MARKERS, newManaged.toString())
-                        .putBoolean(PREF_INITIALIZED, true)
-                        .apply();
+                    JSONObject newManaged = new JSONObject();
+                    for (MarkerData marker : markers) {
+                        AMapMarker next = new AMapMarker(new ALatLon(marker.lat, marker.lon), marker.title);
+                        if (api.addMapMarker(new AddMapMarkerParams(next))) {
+                            JSONObject saved = new JSONObject();
+                            saved.put("title", marker.title);
+                            saved.put("lat", marker.lat);
+                            saved.put("lon", marker.lon);
+                            newManaged.put(marker.tid, saved);
+                        }
+                    }
+
+                    prefs.edit()
+                            .putString(PREF_MARKERS, newManaged.toString())
+                            .putBoolean(PREF_INITIALIZED, true)
+                            .apply();
+                }
             });
         }
 
