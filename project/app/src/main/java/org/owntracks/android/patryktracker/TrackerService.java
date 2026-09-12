@@ -8,22 +8,20 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
-import android.content.SharedPreferences;
-import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.content.SharedPreferences;
 
 import androidx.core.app.ServiceCompat;
+import androidx.preference.PreferenceManager;
 
 import net.osmand.aidlapi.IOsmAndAidlInterface;
 import net.osmand.aidlapi.map.ALatLon;
 import net.osmand.aidlapi.mapmarker.AMapMarker;
 import net.osmand.aidlapi.mapmarker.AddMapMarkerParams;
-import net.osmand.aidlapi.mapmarker.RemoveMapMarkerParams;
 import net.osmand.aidlapi.mapmarker.RemoveMapMarkersParams;
-import net.osmand.aidlapi.mapmarker.UpdateMapMarkerParams;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -36,7 +34,6 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -46,17 +43,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import org.owntracks.android.BuildConfig;
-
 public class TrackerService extends Service {
     private static final long PERIOD_MILLIS = 5L * 60L * 1000L;
     private static final int OSMAND_BIND_TIMEOUT_SECONDS = 20;
     private static final String CHANNEL = "patryk_tracker";
     private static final int NOTIFICATION_ID = 1001;
-    private static final String PREFS = "patryk_tracker_markers";
-    private static final String PREF_MARKERS = "markers";
-    private static final String PREF_SCHEMA = "marker_schema";
-    private static final int MARKER_SCHEMA = 2;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refreshRunnable = new Runnable() {
@@ -125,7 +116,11 @@ public class TrackerService extends Service {
     public static String fetchAndSendOnce(Context context) {
         HttpURLConnection connection = null;
         try {
-            String requestUrl = buildFetchUrl(BuildConfig.PATRYK_TRACKER_URL);
+            SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(context);
+            String configuredUrl = preferences.getString("url", "");
+            if (configuredUrl == null || configuredUrl.isBlank()) return "Brak URL w ustawieniach";
+
+            String requestUrl = buildFetchUrl(configuredUrl);
             connection = (HttpURLConnection) new URL(requestUrl).openConnection();
             connection.setRequestMethod("GET");
             connection.setConnectTimeout(15000);
@@ -172,8 +167,9 @@ public class TrackerService extends Service {
     }
 
     private static String buildFetchUrl(String baseUrl) {
-        String requestUrl = baseUrl.replace("dod=1&", "");
-        return requestUrl + (requestUrl.contains("?") ? "&" : "?") + "spr=1";
+        if (baseUrl.contains("dod=1")) return baseUrl.replace("dod=1", "spr=1");
+        if (baseUrl.contains("spr=1")) return baseUrl;
+        return baseUrl + (baseUrl.contains("?") ? "&" : "?") + "spr=1";
     }
 
     @Override public IBinder onBind(Intent intent) { return null; }
@@ -204,79 +200,17 @@ public class TrackerService extends Service {
 
         private static void replaceAllBlocking(Context context, List<MarkerData> markers) {
             bindAndRun(context, api -> {
-                SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-                int schema = prefs.getInt(PREF_SCHEMA, 0);
-                String oldJson = prefs.getString(PREF_MARKERS, "{}");
+                // The server response is authoritative. Remove every active OsmAnd marker first,
+                // then add exactly the markers returned by the current request. This also clears
+                // markers left behind by older versions or by a previous URL/user list.
+                api.removeAllActiveMapMarkers(new RemoveMapMarkersParams());
 
-                // One-time migration from the old implementation. The old code could leave
-                // duplicate active markers behind because it remembered only the latest marker
-                // for each tid. Bulk cleanup is intentionally done only once, because OsmAnd
-                // moves removed active markers to history.
-                if (schema < MARKER_SCHEMA) {
-                    api.removeAllActiveMapMarkers(new RemoveMapMarkersParams());
-                    oldJson = "{}";
-                }
-
-                JSONObject old = new JSONObject(oldJson);
-                JSONObject newManaged = new JSONObject();
-                Map<String, MarkerData> current = new LinkedHashMap<>();
-                for (MarkerData marker : markers) current.put(marker.tid, marker);
-
-                // Update existing markers in place. This avoids remove/add on every refresh,
-                // which is what previously created marker history entries and duplicates.
-                Iterator<String> oldKeys = old.keys();
-                while (oldKeys.hasNext()) {
-                    String tid = oldKeys.next();
-                    JSONObject saved = old.getJSONObject(tid);
-                    AMapMarker previous = markerFromJson(saved);
-                    MarkerData currentMarker = current.get(tid);
-
-                    if (currentMarker == null) {
-                        api.removeMapMarker(new RemoveMapMarkerParams(previous, true));
-                        continue;
-                    }
-
+                for (MarkerData marker : markers) {
                     AMapMarker next = new AMapMarker(
-                            new ALatLon(currentMarker.lat, currentMarker.lon), currentMarker.title);
-                    boolean updated = api.updateMapMarker(
-                            new UpdateMapMarkerParams(previous, next, true));
-                    if (!updated) {
-                        // If OsmAnd no longer has the old marker, remove any matching stale
-                        // marker and add the current one so the saved state becomes authoritative.
-                        api.removeMapMarker(new RemoveMapMarkerParams(previous, true));
-                        api.addMapMarker(new AddMapMarkerParams(next));
-                    }
-                    saveMarker(newManaged, currentMarker);
-                    current.remove(tid);
+                            new ALatLon(marker.lat, marker.lon), marker.title);
+                    api.addMapMarker(new AddMapMarkerParams(next));
                 }
-
-                // Anything left is a brand-new tid.
-                for (MarkerData marker : current.values()) {
-                    AMapMarker next = new AMapMarker(new ALatLon(marker.lat, marker.lon), marker.title);
-                    if (api.addMapMarker(new AddMapMarkerParams(next))) {
-                        saveMarker(newManaged, marker);
-                    }
-                }
-
-                prefs.edit()
-                        .putString(PREF_MARKERS, newManaged.toString())
-                        .putInt(PREF_SCHEMA, MARKER_SCHEMA)
-                        .apply();
             });
-        }
-
-        private static AMapMarker markerFromJson(JSONObject saved) throws Exception {
-            return new AMapMarker(
-                    new ALatLon(saved.getDouble("lat"), saved.getDouble("lon")),
-                    saved.getString("title"));
-        }
-
-        private static void saveMarker(JSONObject target, MarkerData marker) throws Exception {
-            JSONObject saved = new JSONObject();
-            saved.put("title", marker.title);
-            saved.put("lat", marker.lat);
-            saved.put("lon", marker.lon);
-            target.put(marker.tid, saved);
         }
 
         private interface ApiAction {
