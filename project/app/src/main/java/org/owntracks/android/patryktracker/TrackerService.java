@@ -232,7 +232,7 @@ public class TrackerService extends Service {
         }
 
         private interface ApiAction {
-            void run(IOsmAndAidlInterface api) throws RemoteException;
+            void run(IOsmAndAidlInterface api) throws Exception;
         }
 
         private static void bind(Context context, ApiAction action) {
