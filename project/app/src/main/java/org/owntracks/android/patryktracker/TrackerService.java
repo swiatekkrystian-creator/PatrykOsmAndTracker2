@@ -8,6 +8,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Handler;
@@ -21,6 +22,7 @@ import net.osmand.aidlapi.IOsmAndAidlInterface;
 import net.osmand.aidlapi.map.ALatLon;
 import net.osmand.aidlapi.mapmarker.AMapMarker;
 import net.osmand.aidlapi.mapmarker.AddMapMarkerParams;
+import net.osmand.aidlapi.mapmarker.RemoveMapMarkerParams;
 import net.osmand.aidlapi.mapmarker.RemoveMapMarkersParams;
 
 import org.json.JSONArray;
@@ -34,6 +36,7 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 
@@ -43,6 +46,9 @@ public class TrackerService extends Service {
     private static final long PERIOD_MILLIS = 5L * 60L * 1000L;
     private static final String CHANNEL = "patryk_tracker";
     private static final int NOTIFICATION_ID = 1001;
+    private static final String PREFS = "patryk_tracker_markers";
+    private static final String PREF_MARKERS = "markers";
+    private static final String PREF_INITIALIZED = "initialized";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refreshRunnable = new Runnable() {
@@ -61,10 +67,7 @@ public class TrackerService extends Service {
         createChannel();
         Notification notification = buildNotification("Aktywne — odświeżanie co 5 min");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceCompat.startForeground(
-                    this,
-                    NOTIFICATION_ID,
-                    notification,
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
         } else {
             startForeground(NOTIFICATION_ID, notification);
@@ -83,12 +86,8 @@ public class TrackerService extends Service {
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CHANNEL)
                 : new Notification.Builder(this);
-        return builder
-                .setContentTitle("Patryk → OsmAnd")
-                .setContentText(text)
-                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-                .setOngoing(true)
-                .build();
+        return builder.setContentTitle("Patryk → OsmAnd").setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_menu_mylocation).setOngoing(true).build();
     }
 
     private void updateNotification(String text) {
@@ -98,9 +97,7 @@ public class TrackerService extends Service {
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                    CHANNEL,
-                    "Patryk → OsmAnd",
+            NotificationChannel channel = new NotificationChannel(CHANNEL, "Patryk → OsmAnd",
                     NotificationManager.IMPORTANCE_LOW);
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm != null) nm.createNotificationChannel(channel);
@@ -113,11 +110,8 @@ public class TrackerService extends Service {
 
     public static void scheduleNext(Context context, long delayMillis) {
         Intent service = new Intent(context, TrackerService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(service);
-        } else {
-            context.startService(service);
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(service);
+        else context.startService(service);
     }
 
     public static String fetchAndSendOnce(Context context) {
@@ -133,15 +127,14 @@ public class TrackerService extends Service {
             if (code != 200) return "HTTP " + code;
 
             StringBuilder body = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    connection.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) body.append(line);
             }
 
             JSONArray all = new JSONArray(body.toString());
             List<MarkerData> markers = new ArrayList<>();
-
             for (int i = 0; i < all.length(); i++) {
                 JSONObject object = all.getJSONObject(i);
                 if (!object.has("lat") || !object.has("lon") || !object.has("tid")) continue;
@@ -157,15 +150,10 @@ public class TrackerService extends Service {
                 String time = tst > 0
                         ? new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date(tst * 1000L))
                         : "--:--";
-                String title = name + " "
-                        + (batt >= 0 ? "🔋 " + batt + "%" : "🔋 --")
-                        + " " + time;
-
-                markers.add(new MarkerData(title, lat, lon));
+                String title = name + " " + (batt >= 0 ? "🔋 " + batt + "%" : "🔋 --") + " " + time;
+                markers.add(new MarkerData(tid, title, lat, lon));
             }
 
-            // Only touch OsmAnd after the server response was successfully downloaded and parsed.
-            // This prevents a temporary network error from wiping the currently visible markers.
             OsmAndMarker.replaceAll(context, markers);
             return "Pobrano " + all.length() + ", ustawiono flagi " + markers.size();
         } catch (Exception e) {
@@ -183,11 +171,13 @@ public class TrackerService extends Service {
     @Override public IBinder onBind(Intent intent) { return null; }
 
     private static final class MarkerData {
+        final String tid;
         final String title;
         final double lat;
         final double lon;
 
-        MarkerData(String title, double lat, double lon) {
+        MarkerData(String tid, String title, double lat, double lon) {
+            this.tid = tid;
             this.title = title;
             this.lat = lat;
             this.lon = lon;
@@ -196,20 +186,49 @@ public class TrackerService extends Service {
 
     private static class OsmAndMarker {
         static void replaceAll(Context context, List<MarkerData> markers) {
-            bind(context, api -> {
-                // Remove all active markers first. This gets rid of markers created by older
-                // versions/refreshes, including duplicates whose titles have changed.
-                api.removeAllActiveMapMarkers(new RemoveMapMarkersParams());
+            SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            boolean initialized = prefs.getBoolean(PREF_INITIALIZED, false);
+            String oldJson = prefs.getString(PREF_MARKERS, "{}");
 
-                // Add markers through the same AIDL connection and in JSON order. Separate
-                // bindService calls used previously raced each other and scrambled marker order.
-                for (MarkerData marker : markers) {
-                    AMapMarker next = new AMapMarker(
-                            new ALatLon(marker.lat, marker.lon),
-                            marker.title);
-                    api.addMapMarker(new AddMapMarkerParams(next));
+            bind(context, api -> {
+                // First run after this fix: clean the old duplicate set once.
+                // Subsequent refreshes remove only markers created by this app, so they do not enter history.
+                if (!initialized) {
+                    api.removeAllActiveMapMarkers(new RemoveMapMarkersParams());
+                } else {
+                    removeManagedMarkers(api, oldJson);
                 }
+
+                JSONObject newManaged = new JSONObject();
+                for (MarkerData marker : markers) {
+                    AMapMarker next = new AMapMarker(new ALatLon(marker.lat, marker.lon), marker.title);
+                    if (api.addMapMarker(new AddMapMarkerParams(next))) {
+                        JSONObject saved = new JSONObject();
+                        saved.put("title", marker.title);
+                        saved.put("lat", marker.lat);
+                        saved.put("lon", marker.lon);
+                        newManaged.put(marker.tid, saved);
+                    }
+                }
+
+                prefs.edit()
+                        .putString(PREF_MARKERS, newManaged.toString())
+                        .putBoolean(PREF_INITIALIZED, true)
+                        .apply();
             });
+        }
+
+        private static void removeManagedMarkers(IOsmAndAidlInterface api, String oldJson) throws Exception {
+            JSONObject old = new JSONObject(oldJson);
+            Iterator<String> keys = old.keys();
+            while (keys.hasNext()) {
+                String tid = keys.next();
+                JSONObject saved = old.getJSONObject(tid);
+                AMapMarker previous = new AMapMarker(
+                        new ALatLon(saved.getDouble("lat"), saved.getDouble("lon")),
+                        saved.getString("title"));
+                api.removeMapMarker(new RemoveMapMarkerParams(previous, true));
+            }
         }
 
         private interface ApiAction {
@@ -224,8 +243,7 @@ public class TrackerService extends Service {
                     context.getPackageManager().getPackageInfo(candidate, 0);
                     pkg = candidate;
                     break;
-                } catch (Exception ignored) {
-                }
+                } catch (Exception ignored) { }
             }
             if (pkg == null) return;
 
@@ -245,8 +263,7 @@ public class TrackerService extends Service {
             };
             try {
                 context.bindService(intent, connection, Context.BIND_AUTO_CREATE);
-            } catch (Exception ignored) {
-            }
+            } catch (Exception ignored) { }
         }
     }
 }
