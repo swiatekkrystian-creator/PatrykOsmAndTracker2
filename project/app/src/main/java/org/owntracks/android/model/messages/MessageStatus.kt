@@ -14,9 +14,11 @@ class MessageStatus(@Transient private val messageWithId: MessageWithId = Messag
   @SerialName("_id")
   override var messageId: MessageId = messageWithId.messageId
 
+  @SerialName("tid") var trackerId: String = ""
+
   var android: AddMessageStatus? = null
 
-  override fun toString(): String = "[MessageStatus android=${android}]"
+  override fun toString(): String = "[MessageStatus tid=${trackerId} android=${android}]"
 
   override fun annotateFromPreferences(preferences: Preferences) {
     topic = preferences.pubTopicStatus
