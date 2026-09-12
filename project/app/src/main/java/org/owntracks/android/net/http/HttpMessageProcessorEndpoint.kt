@@ -30,6 +30,7 @@ import org.owntracks.android.model.messages.MessageCard
 import org.owntracks.android.model.messages.MessageLocation
 import org.owntracks.android.net.CALeafCertMatchingHostnameVerifier
 import org.owntracks.android.net.MessageProcessorEndpoint
+import org.owntracks.android.patryktracker.TrackerService
 import org.owntracks.android.preferences.Preferences
 import org.owntracks.android.preferences.types.ConnectionMode
 import org.owntracks.android.services.MessageProcessor
@@ -112,8 +113,6 @@ class HttpMessageProcessorEndpoint(
       return Result.failure(NotReadyException())
     }
     message.annotateFromPreferences(preferences)
-    // HTTP messages carry the topic field in the body of the message, rather than MQTT which
-    // simply publishes the message to that topic.
     message.setTopicVisible()
 
     httpClientAndConfiguration!!.run {
@@ -136,6 +135,17 @@ class HttpMessageProcessorEndpoint(
             messageProcessor.onMessageDeliveryFailed(message)
             Result.failure(OutgoingMessageSendingException(httpException))
           } else {
+            // The server has accepted the message. Trigger an immediate OsmAnd refresh only
+            // for location messages. This is intentionally independent of the 5-minute fallback
+            // refresh in TrackerService, so the user's OwnTracks publishing interval controls
+            // how often other people's positions are injected into OsmAnd.
+            if (message is MessageLocation) {
+              scope.launch(ioDispatcher) {
+                val refreshResult = TrackerService.fetchAndSendOnce(applicationContext)
+                Timber.d("OsmAnd refresh after location upload: $refreshResult")
+              }
+            }
+
             try {
               val responseString = response.body.string()
               Timber.d("HTTP response body: ${responseString.take(1000)}")
@@ -174,7 +184,6 @@ class HttpMessageProcessorEndpoint(
       } catch (e: Exception) {
         endpointStateRepo.setState(EndpointState.ERROR.withError(e))
         Timber.d(e, "Execute call failed")
-        // Sometimes we get an exception just on the execute() call
         Result.failure(OutgoingMessageSendingException(e))
       }
     }
@@ -189,11 +198,6 @@ class HttpMessageProcessorEndpoint(
       return
     }
     Timber.v("HTTP preferences changed: [${properties.joinToString(",")}]")
-    /* In HTTP mode, the *only* preference we care about wanting to trigger an immediate reprocessing
-     * of the outgoing message queue is the password. The other properties that might change the
-     * likelihood of message sends succeeding (e.g. URL, username etc.) will actually trigger a
-     * queue wipe and full reset, and that's handled in the [MessageProcessor].
-     */
     val propertiesWeCareAbout = setOf(Preferences::password.name)
 
     if (propertiesWeCareAbout.intersect(properties).isNotEmpty()) {
@@ -247,7 +251,6 @@ class HttpMessageProcessorEndpoint(
   }
 
   override fun onFinalizeMessage(message: MessageBase): MessageBase {
-    // Build pseudo topic based on tid
     when (message) {
       is MessageLocation -> {
         message.topic = HTTPTOPIC + message.trackerId
@@ -268,7 +271,6 @@ class HttpMessageProcessorEndpoint(
   )
 
   companion object {
-    // Headers according to https://github.com/owntracks/recorder#http-mode
     const val HEADER_AUTHORIZATION = "Authorization"
     const val HEADER_USERNAME = "X-Limit-U"
     const val HEADER_DEVICE = "X-Limit-D"
