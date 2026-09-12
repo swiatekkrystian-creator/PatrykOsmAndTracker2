@@ -24,6 +24,7 @@ class MessageStatus(@Transient private val messageWithId: MessageWithId = Messag
     topic = preferences.pubTopicStatus
     qos = preferences.pubQosStatus.value
     retained = preferences.pubRetainStatus
+    trackerId = preferences.tid.toString()
   }
 
   override val baseTopicSuffix: String
